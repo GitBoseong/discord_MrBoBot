@@ -43,8 +43,8 @@ def setup_music_commands(bot):
             'options': '-vn'
         }
         vc = ctx.voice_client
-        audio_source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
-        vc.play(audio_source, after=lambda e: bot.loop.create_task(check_queue(ctx)))
+        audio_source = discord.FFmpegPCMAudio(url, options='-vn')
+        ctx.voice_client.play(audio_source, after=lambda e: bot.loop.create_task(check_queue(ctx)))
 
         current_song_title = title
 
