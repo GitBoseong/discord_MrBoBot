@@ -1,45 +1,55 @@
-# commands/music.py
 import discord
 from discord.ext import commands
 from discord.ui import Button, View
-from utils.youtube import get_youtube_info
+from yt_dlp import YoutubeDL
 
 music_queue = []
 current_song_title = None
 
+# YouTube에서 스트림 URL을 가져오는 함수
+def get_stream_url(youtube_url, format_id="140"):
+    """YouTube에서 지정된 형식의 스트림 URL 가져오기"""
+    ydl_opts = {
+        'format': format_id,  # 오디오 스트림 포맷
+        'quiet': True,
+    }
+    with YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(youtube_url, download=False)
+        return info['url'], info['title'], info['thumbnail']
+
+# Discord 봇 명령어 설정
 def setup_music_commands(bot):
     @bot.command(name='play')
     async def play(ctx, *, search: str):
         global current_song_title
-        info = get_youtube_info(search)
-        url = info['webpage_url']
-        title = info['title']
-        thumbnail = info['thumbnail']
+        # 스트림 URL, 제목, 썸네일 가져오기
+        stream_url, title, thumbnail = get_stream_url(search)
         voice_channel = ctx.author.voice.channel
 
+        # 음성 채널에 연결
         if not ctx.voice_client:
             await voice_channel.connect()
 
+        # 현재 재생 중일 경우 대기열에 추가
         if ctx.voice_client.is_playing():
-            music_queue.append((title, url))
+            music_queue.append((title, stream_url))
             await ctx.send(f"**{title}** added to the queue.")
             return
 
+        # 새로운 곡 재생
         ctx.voice_client.stop()
         FFMPEG_OPTIONS = {
-            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -user_agent "Mozilla/5.0"',
             'options': '-vn'
         }
-        YDL_OPTIONS = {'format': "bestaudio"}
         vc = ctx.voice_client
-
-        with discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS) as audio_source:
-            vc.play(audio_source, after=lambda e: check_queue(ctx))
+        audio_source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
+        vc.play(audio_source, after=lambda e: bot.loop.create_task(check_queue(ctx)))
 
         current_song_title = title
 
         # Embed 생성
-        embed = discord.Embed(title="Now Playing", description=f"[{title}]({url})", color=discord.Color.blue())
+        embed = discord.Embed(title="Now Playing", description=f"[{title}]({search})", color=discord.Color.blue())
         embed.set_thumbnail(url=thumbnail)
 
         # 버튼 생성
@@ -52,7 +62,7 @@ def setup_music_commands(bot):
         async def stop_callback(interaction):
             vc.stop()
             await interaction.response.send_message("음악이 종료되었습니다.")
-        
+
         async def pause_callback(interaction):
             if vc and vc.is_playing():
                 vc.pause()
@@ -74,7 +84,7 @@ def setup_music_commands(bot):
                 vc.stop()
                 current_song_title = None
                 await interaction.response.send_message(f"**{skipped_song_title}** has been skipped.")
-                check_queue(ctx)
+                await check_queue(ctx)
 
         # 버튼에 콜백 연결
         stop_button.callback = stop_callback
@@ -121,10 +131,22 @@ def setup_music_commands(bot):
         )
         await ctx.send(help_text)
 
-    def check_queue(ctx):
+    async def check_queue(ctx):
+        """재생 대기열을 확인하고 다음 곡 재생"""
         global current_song_title
         if len(music_queue) > 0:
             next_song = music_queue.pop(0)
-            bot.loop.create_task(play(ctx, search=next_song[1]))
+            current_song_title = next_song[0]
+
+            FFMPEG_OPTIONS = {
+                'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -user_agent "Mozilla/5.0"',
+                'options': '-vn'
+            }
+            vc = ctx.voice_client
+            audio_source = discord.FFmpegPCMAudio(next_song[1], **FFMPEG_OPTIONS)
+            vc.play(audio_source, after=lambda e: bot.loop.create_task(check_queue(ctx)))
+
+            await ctx.send(f"Now playing: **{current_song_title}**")
         else:
             current_song_title = None
+            await ctx.send("Queue is now empty.")
