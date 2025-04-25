@@ -134,5 +134,7 @@ class MusicCog(commands.Cog):
         else:
             await ctx.send("⚠️ 유효한 번호를 입력해주세요.")
 
-def setup(bot: commands.Bot):
-    bot.add_cog(MusicCog(bot))
+# async setup 함수로 변경
+async def setup(bot: commands.Bot):
+    """Extension 로드 시 호출되는 비동기 setup 함수"""
+    await bot.add_cog(MusicCog(bot))

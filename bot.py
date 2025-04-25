@@ -1,7 +1,6 @@
 # bot.py
 
 import os
-import asyncio
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -20,7 +19,7 @@ class MyBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        # Cog 자동 로드
+        # Cog 자동 로드 (await 가능한 setup)
         for cog in ("cogs.music_cog", "cogs.general_cog"):
             await self.load_extension(cog)
             print(f"[OK] Loaded {cog}")

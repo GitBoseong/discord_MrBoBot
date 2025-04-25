@@ -21,5 +21,7 @@ class GeneralCog(commands.Cog):
         else:
             await ctx.send("⚠️ 아직 음성 채널에 없습니다.")
 
-def setup(bot: commands.Bot):
-    bot.add_cog(GeneralCog(bot))
+# async setup 함수로 변경
+async def setup(bot: commands.Bot):
+    """Extension 로드 시 호출되는 비동기 setup 함수"""
+    await bot.add_cog(GeneralCog(bot))
