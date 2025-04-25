@@ -1,43 +1,34 @@
-# cogs/music_cog.py
+# bot.py
 
+import os
 import discord
 from discord.ext import commands
-import youtube_dl
+from dotenv import load_dotenv
 
-# ─── 재접속 옵션 정의 ─────────────────────────────────────────────
-FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn'
-}
+# 1) .env 로드
+load_dotenv()
+TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+if not TOKEN:
+    raise RuntimeError("DISCORD_BOT_TOKEN이 설정되지 않았습니다.")
 
-YTDL_OPTIONS = {
-    'format': 'bestaudio/best',
-    'noplaylist': True,
-    # ...기타 youtube_dl 옵션...
-}
+# 2) Bot 클래스 서브클래싱
+class MyBot(commands.Bot):
+    def __init__(self):
+        intents = discord.Intents.default()
+        intents.message_content = True
+        super().__init__(command_prefix="!", intents=intents)
 
-class MusicCog(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
+    async def setup_hook(self):
+        # Cog 자동 로드
+        for cog in ("cogs.music_cog", "cogs.general_cog"):
+            await self.load_extension(cog)
+            print(f"[OK] Loaded {cog}")
 
-    @commands.command()
-    async def play(self, ctx, url: str):
-        # 1) 음성 채널에 연결
-        if not ctx.author.voice:
-            return await ctx.send("먼저 음성 채널에 들어가 있어야 해요.")
-        vc = await ctx.author.voice.channel.connect()
+bot = MyBot()
 
-        # 2) youtube_dl 로 오디오 URL 추출
-        with youtube_dl.YoutubeDL(YTDL_OPTIONS) as ydl:
-            info = ydl.extract_info(url, download=False)
-            audio_url = info['formats'][0]['url']
+@bot.event
+async def on_ready():
+    print(f"{bot.user} 봇이 준비되었습니다.")
 
-        # 3) FFmpegPCMAudio 에 재접속 옵션 주입
-        source = discord.FFmpegPCMAudio(audio_url, **FFMPEG_OPTIONS)
-
-        # 4) 재생
-        vc.play(source, after=lambda e: print("Playback finished.", e))
-        await ctx.send(f"재생 시작: {info.get('title')}")
-
-def setup(bot):
-    bot.add_cog(MusicCog(bot))
+# 3) 봇 실행 — 이 줄이 반드시 있어야 스크립트가 종료되지 않고 디스코드에 연결됩니다!
+bot.run(TOKEN)
