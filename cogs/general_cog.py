@@ -1,3 +1,6 @@
+# cogs/general_cog.py
+
+import discord
 from discord.ext import commands
 
 class GeneralCog(commands.Cog):
@@ -14,9 +17,9 @@ class GeneralCog(commands.Cog):
     async def leave(self, ctx: commands.Context):
         if ctx.voice_client:
             await ctx.voice_client.disconnect()
-            await ctx.send("음성 채널에서 나왔습니다.")
+            await ctx.send("✅ 음성 채널에서 나왔습니다.")
         else:
-            await ctx.send("⚠️ 이미 음성 채널에 없습니다.")
+            await ctx.send("⚠️ 아직 음성 채널에 없습니다.")
 
 def setup(bot: commands.Bot):
     bot.add_cog(GeneralCog(bot))

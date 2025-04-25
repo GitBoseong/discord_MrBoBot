@@ -1,3 +1,5 @@
+# utils/youtube_service.py
+
 import yt_dlp
 
 class YouTubeService:
@@ -25,7 +27,6 @@ class YouTubeService:
         """
         with yt_dlp.YoutubeDL(cls.YDL_OPTS) as ydl:
             info = ydl.extract_info(video_url, download=False)
-            # audio-only 포맷 선택
             for f in info['formats']:
                 if f.get('acodec') != 'none' and f.get('vcodec') == 'none':
                     return f['url']

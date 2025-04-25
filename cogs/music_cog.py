@@ -1,3 +1,5 @@
+# cogs/music_cog.py
+
 import discord
 import asyncio
 from discord.ext import commands
@@ -14,7 +16,7 @@ class MusicCog(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.queue: list[tuple[str, str]] = []  # 제목, URL
+        self.queue: list[tuple[str, str]] = []  # (제목, URL)
         self.current_title: str | None = None
 
     @commands.command(name='play')
@@ -22,8 +24,8 @@ class MusicCog(commands.Cog):
         """
         검색어 또는 URL로 노래를 재생하거나 큐에 추가.
         """
-        # 1) YouTubeService로 정보 조회
-        if search.startswith('http'):
+        # 1) 검색어 → 정보 조회
+        if search.startswith(('http://', 'https://')):
             info = {'webpage_url': search, 'title': search, 'thumbnail': None}
         else:
             info = YouTubeService.search(search)
@@ -31,19 +33,22 @@ class MusicCog(commands.Cog):
         title = info['title']
         thumb = info.get('thumbnail')
 
-        # 2) 음성 채널 유효성 검사
-        if not ctx.author.voice or not ctx.author.voice.channel:
-            await ctx.send("⚠️ 먼저 음성 채널에 들어가 있어야 합니다.")
-            return
-        voice = ctx.voice_client or await ctx.author.voice.channel.connect()
+        # 2) 음성 채널 입장 확인
+        voice = ctx.voice_client
+        if not voice:
+            if ctx.author.voice and ctx.author.voice.channel:
+                voice = await ctx.author.voice.channel.connect()
+            else:
+                await ctx.send("⚠️ 먼저 음성 채널에 입장해주세요.")
+                return
 
         # 3) 이미 재생 중이면 큐에 추가
         if voice.is_playing():
             self.queue.append((title, url))
-            await ctx.send(f"➕ **{title}** 가 큐에 추가되었습니다.")
+            await ctx.send(f"➕ **{title}** 큐에 추가되었습니다.")
             return
 
-        # 4) 재생
+        # 4) 바로 재생
         await self._start_play(ctx, voice, title, url, thumb)
 
     async def _start_play(
@@ -54,54 +59,56 @@ class MusicCog(commands.Cog):
         url: str,
         thumbnail: str | None
     ):
-        """실제 FFmpegPCMAudio 생성→재생, 임베드+버튼 전송."""
-        # 스트림 URL 추출
+        """FFmpegPCMAudio 생성→재생, 임베드+버튼 전송."""
         stream_url = YouTubeService.get_stream_url(url)
         source = discord.FFmpegPCMAudio(stream_url, **self.FFMPEG_OPTIONS)
         voice.play(source, after=lambda e: self._after_play(ctx, e))
 
         self.current_title = title
 
-        # Now Playing Embed + Controls
-        embed = discord.Embed(title="Now Playing", description=f"[{title}]({url})")
+        # Now Playing 임베드
+        embed = discord.Embed(title="▶️ Now Playing", description=f"[{title}]({url})")
         if thumbnail:
             embed.set_thumbnail(url=thumbnail)
 
-        # 버튼 View
-        view = discord.ui.View()
-        view.add_item(discord.ui.Button(label="⏸️ Pause", custom_id="pause", style=discord.ButtonStyle.secondary))
-        view.add_item(discord.ui.Button(label="▶️ Resume", custom_id="resume", style=discord.ButtonStyle.secondary))
-        view.add_item(discord.ui.Button(label="⏭️ Skip", custom_id="skip", style=discord.ButtonStyle.primary))
-        view.add_item(discord.ui.Button(label="⏹️ Stop", custom_id="stop", style=discord.ButtonStyle.danger))
-
-        # 콜백 등록
-        async def button_callback(interaction: discord.Interaction):
-            if interaction.custom_id == "pause" and voice.is_playing():
-                voice.pause()
-                await interaction.response.send_message("⏸️ 재생 일시정지", ephemeral=True)
-            elif interaction.custom_id == "resume" and voice.is_paused():
-                voice.resume()
-                await interaction.response.send_message("▶️ 재생 재개", ephemeral=True)
-            elif interaction.custom_id == "skip":
-                await interaction.response.send_message(f"⏭️ **{self.current_title}** 스킵", ephemeral=True)
-                voice.stop()
-            elif interaction.custom_id == "stop":
-                voice.stop()
-                await interaction.response.send_message("⏹️ 재생 종료", ephemeral=True)
-
-        view.on_timeout = lambda: None
-        for child in view.children:
-            child.callback = button_callback
+        # 버튼 뷰
+        view = discord.ui.View(timeout=None)
+        for label, style, cid in [
+            ("⏸️ Pause", discord.ButtonStyle.secondary, "pause"),
+            ("▶️ Resume", discord.ButtonStyle.secondary, "resume"),
+            ("⏭️ Skip", discord.ButtonStyle.primary, "skip"),
+            ("⏹️ Stop", discord.ButtonStyle.danger, "stop"),
+        ]:
+            btn = discord.ui.Button(label=label, style=style, custom_id=cid)
+            btn.callback = self._make_button_callback(voice)
+            view.add_item(btn)
 
         await ctx.send(embed=embed, view=view)
 
+    def _make_button_callback(self, voice: discord.VoiceClient):
+        async def callback(interaction: discord.Interaction):
+            cid = interaction.data['custom_id']
+            if cid == "pause" and voice.is_playing():
+                voice.pause()
+                await interaction.response.send_message("⏸️ 재생 일시정지", ephemeral=True)
+            elif cid == "resume" and voice.is_paused():
+                voice.resume()
+                await interaction.response.send_message("▶️ 재생 재개", ephemeral=True)
+            elif cid == "skip":
+                skipped = self.current_title
+                voice.stop()
+                await interaction.response.send_message(f"⏭️ **{skipped}** 스킵", ephemeral=True)
+            elif cid == "stop":
+                voice.stop()
+                await interaction.response.send_message("⏹️ 재생 종료", ephemeral=True)
+        return callback
+
     def _after_play(self, ctx: commands.Context, error):
         """
-        재생 종료 후 큐 확인.
-        (음성 스레드 밖에서 안전하게 코루틴 실행)
+        재생 종료 후 대기열 확인.
         """
         if error:
-            print(f"Playback error: {error}")
+            print(f"[MusicCog] playback error: {error}")
         if self.queue:
             title, url = self.queue.pop(0)
             coro = self.play(ctx, search=url)

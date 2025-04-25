@@ -1,29 +1,35 @@
+# bot.py
+
 import os
-from dotenv import load_dotenv
+import asyncio
 import discord
 from discord.ext import commands
+from dotenv import load_dotenv
 
-# .env에서 토큰 로드
+# 1) .env 로드
 load_dotenv()
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("DISCORD_BOT_TOKEN이 설정되지 않았습니다.")
 
-# Bot 초기화
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+# 2) Bot 클래스 서브클래싱
+class MyBot(commands.Bot):
+    def __init__(self):
+        intents = discord.Intents.default()
+        intents.message_content = True
+        super().__init__(command_prefix="!", intents=intents)
 
-# Cog 자동 로드
-for cog in ("cogs.music_cog", "cogs.general_cog"):
-    try:
-        bot.load_extension(cog)
-        print(f"[OK] Loaded {cog}")
-    except Exception as e:
-        print(f"[ERR] Failed loading {cog}: {e}")
+    async def setup_hook(self):
+        # Cog 자동 로드
+        for cog in ("cogs.music_cog", "cogs.general_cog"):
+            await self.load_extension(cog)
+            print(f"[OK] Loaded {cog}")
+
+bot = MyBot()
 
 @bot.event
 async def on_ready():
     print(f"{bot.user} 봇이 준비되었습니다.")
 
+# 3) 봇 실행
 bot.run(TOKEN)
