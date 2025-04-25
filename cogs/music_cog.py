@@ -1,19 +1,25 @@
-# cogs/music_cog.py
-
 import discord
 import asyncio
 from discord.ext import commands
-from utils.youtube_service import YouTubeService
+import youtube_dl
+
+# ─── 유튜브 DL 옵션 (오디오 전용) ────────────────────────────────────
+YTDL_OPTIONS = {
+    'format': 'bestaudio/best',
+    'noplaylist': True,
+    # 기타 youtube_dl 옵션을 필요에 따라 추가
+}
+
+# ─── FFmpeg 재접속 옵션 ─────────────────────────────────────────────
+FFMPEG_OPTIONS = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn'
+}
 
 class MusicCog(commands.Cog):
     """
     음악 재생, 큐 관리, 버튼 인터랙션을 담당하는 Cog.
     """
-    FFMPEG_OPTIONS = {
-        'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-        'options': '-vn'
-    }
-
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.queue: list[tuple[str, str]] = []  # (제목, URL)
@@ -26,12 +32,12 @@ class MusicCog(commands.Cog):
         """
         # 1) 검색어 → 정보 조회
         if search.startswith(('http://', 'https://')):
-            info = {'webpage_url': search, 'title': search, 'thumbnail': None}
+            title = search
+            url = search
         else:
-            info = YouTubeService.search(search)
-        url = info['webpage_url']
-        title = info['title']
-        thumb = info.get('thumbnail')
+            # YouTubeService.search()를 사용하던 부분 대신, 직접 URL로 검색하거나
+            await ctx.send("⚠️ 검색 기능은 현재 URL 입력만 지원합니다.")
+            return
 
         # 2) 음성 채널 입장 확인
         voice = ctx.voice_client
@@ -49,59 +55,38 @@ class MusicCog(commands.Cog):
             return
 
         # 4) 바로 재생
-        await self._start_play(ctx, voice, title, url, thumb)
+        await self._start_play(ctx, voice, title, url)
 
     async def _start_play(
         self,
         ctx: commands.Context,
         voice: discord.VoiceClient,
         title: str,
-        url: str,
-        thumbnail: str | None
+        url: str
     ):
         """FFmpegPCMAudio 생성→재생, 임베드+버튼 전송."""
-        stream_url = YouTubeService.get_stream_url(url)
-        source = discord.FFmpegPCMAudio(stream_url, **self.FFMPEG_OPTIONS)
+        # 유튜브 DL로 스트림 정보 추출
+        with youtube_dl.YoutubeDL(YTDL_OPTIONS) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        # 비디오 없는 오디오 전용 스트림, HLS 매니페스트 제외
+        audio_format = next(
+            f for f in info['formats']
+            if f.get('vcodec') == 'none'
+            and f.get('acodec') != 'none'
+            and not f['url'].endswith('.m3u8')
+        )
+        stream_url = audio_format['url']
+
+        # FFmpegPCMAudio에 재접속 옵션 주입
+        source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
         voice.play(source, after=lambda e: self._after_play(ctx, e))
 
         self.current_title = title
 
         # Now Playing 임베드
         embed = discord.Embed(title="▶️ Now Playing", description=f"[{title}]({url})")
-        if thumbnail:
-            embed.set_thumbnail(url=thumbnail)
-
-        # 버튼 뷰
-        view = discord.ui.View(timeout=None)
-        for label, style, cid in [
-            ("⏸️ Pause", discord.ButtonStyle.secondary, "pause"),
-            ("▶️ Resume", discord.ButtonStyle.secondary, "resume"),
-            ("⏭️ Skip", discord.ButtonStyle.primary, "skip"),
-            ("⏹️ Stop", discord.ButtonStyle.danger, "stop"),
-        ]:
-            btn = discord.ui.Button(label=label, style=style, custom_id=cid)
-            btn.callback = self._make_button_callback(voice)
-            view.add_item(btn)
-
-        await ctx.send(embed=embed, view=view)
-
-    def _make_button_callback(self, voice: discord.VoiceClient):
-        async def callback(interaction: discord.Interaction):
-            cid = interaction.data['custom_id']
-            if cid == "pause" and voice.is_playing():
-                voice.pause()
-                await interaction.response.send_message("⏸️ 재생 일시정지", ephemeral=True)
-            elif cid == "resume" and voice.is_paused():
-                voice.resume()
-                await interaction.response.send_message("▶️ 재생 재개", ephemeral=True)
-            elif cid == "skip":
-                skipped = self.current_title
-                voice.stop()
-                await interaction.response.send_message(f"⏭️ **{skipped}** 스킵", ephemeral=True)
-            elif cid == "stop":
-                voice.stop()
-                await interaction.response.send_message("⏹️ 재생 종료", ephemeral=True)
-        return callback
+        await ctx.send(embed=embed)
 
     def _after_play(self, ctx: commands.Context, error):
         """
@@ -133,6 +118,7 @@ class MusicCog(commands.Cog):
             await ctx.send(f"❌ **{title}** 을(를) 제거했습니다.")
         else:
             await ctx.send("⚠️ 유효한 번호를 입력해주세요.")
+
 
 # async setup 함수로 변경
 async def setup(bot: commands.Bot):
