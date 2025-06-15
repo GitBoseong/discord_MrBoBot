@@ -29,14 +29,16 @@ MrBoBot은 디스코드 서버에서 음악을 재생하고 관리할 수 있는
 ## 파일 구조
 ```
 MrBoBot/
-├── bot.py           # 봇의 메인 실행 파일
-├── config.py        # 환경 변수 로드 및 봇 설정
-├── commands/        # 명령어 관련 모듈 폴더
-│   ├── music.py     # 음악 관련 명령어 정의
-│   └── general.py   # 일반 명령어 정의
-├── utils/           # 유틸리티 함수 폴더
-│   └── youtube.py   # 유튜브 관련 함수
-└── README.md        # 프로젝트 설명 파일
+├── bot.py # 봇의 메인 실행 파일
+├── config.py # 환경 변수 로드 및 봇 설정
+├── cogs/ # Cog(명령어) 모듈 폴더
+│ ├── general.py # 일반 명령어 정의
+│ └── music_cog.py # 음악 관련 명령어 정의
+├── utils/ # 유틸리티 함수 폴더
+│ └── youtube.py # 유튜브 검색/다운로드 함수
+├── requirements.txt # Python 패키지 목록
+├── run_bot.bat # Windows용 실행 스크립트
+└── README.md # 프로젝트 설명 파일
 ```
 
 ## 설치 및 실행 방법
