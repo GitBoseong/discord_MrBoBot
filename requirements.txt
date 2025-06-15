@@ -1,0 +1,6 @@
+## requirements.txt
+
+discord.py>=2.0.0
+yt_dlp
+python-dotenv
+PyNaCl
