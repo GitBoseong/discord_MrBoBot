@@ -6,6 +6,7 @@ from discord import FFmpegPCMAudio
 from discord.ui import View, Button
 from config import FFMPEG_OPTIONS
 from utils.youtube import search_youtube_info
+import asyncio  # 추가
 
 class Music(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -15,19 +16,34 @@ class Music(commands.Cog):
 
     async def _play_track(self, interaction_or_ctx, info: dict):
         """실제 오디오 재생 및 임베드+버튼 메시지 전송"""
-        # interaction 또는 ctx 로부터 guild, vc, 채널 가져오기
+        # guild, channel, vc 얻기
         if isinstance(interaction_or_ctx, discord.Interaction):
             guild = interaction_or_ctx.guild
             channel = interaction_or_ctx.channel
+            user = interaction_or_ctx.user
         else:
             guild = interaction_or_ctx.guild
             channel = interaction_or_ctx.channel
+            user = interaction_or_ctx.author
 
         vc = guild.voice_client
-        # 똑같이 VC 연결은 이미 되어 있다고 가정
-        
+
+        # after 콜백: 노래 끝나면 _play_next 스케줄
+        def _after_play(error):
+            # 오류가 있으면 로그
+            if error:
+                print(f"[Music Cog] 플레이 중 에러: {error}")
+            # 코루틴 스케줄링
+            asyncio.run_coroutine_threadsafe(
+                self._play_next(interaction_or_ctx),
+                self.bot.loop
+            )
+
         # 재생
-        vc.play(FFmpegPCMAudio(info['url'], **FFMPEG_OPTIONS))
+        vc.play(
+            FFmpegPCMAudio(info['url'], **FFMPEG_OPTIONS),
+            after=_after_play
+        )
 
         # 임베드 + 버튼
         embed = discord.Embed(
@@ -36,7 +52,7 @@ class Music(commands.Cog):
         )
         if thumb := info.get('thumbnail'):
             embed.set_thumbnail(url=thumb)
-        embed.add_field(name="요청자", value=interaction_or_ctx.user.mention if isinstance(interaction_or_ctx, discord.Interaction) else interaction_or_ctx.author.mention)
+        embed.add_field(name="요청자", value=user.mention)
 
         view = View()
         view.add_item(Button(label="⏸️ 일시정지", style=discord.ButtonStyle.secondary, custom_id="pause"))
@@ -45,6 +61,28 @@ class Music(commands.Cog):
         view.add_item(Button(label="⏭️ 다음곡", style=discord.ButtonStyle.primary,  custom_id="skip"))
 
         await channel.send(embed=embed, view=view)
+
+    async def _play_next(self, interaction_or_ctx):
+        """현재 재생이 끝난 후 큐에서 다음 곡 꺼내서 재생"""
+        # guild, channel 얻기
+        if isinstance(interaction_or_ctx, discord.Interaction):
+            guild = interaction_or_ctx.guild
+            channel = interaction_or_ctx.channel
+        else:
+            guild = interaction_or_ctx.guild
+            channel = interaction_or_ctx.channel
+
+        gid = guild.id
+        q = self.queue.get(gid, [])
+        if not q:
+            # 큐가 비어 있으면 아무 것도 안 함
+            return
+
+        # 다음 곡
+        next_info = q.pop(0)
+        self.queue[gid] = q
+        # 재생
+        await self._play_track(interaction_or_ctx, next_info)
 
     @commands.command(name='join')
     async def join(self, ctx: commands.Context):
@@ -83,7 +121,7 @@ class Music(commands.Cog):
         info = search_youtube_info(query)
 
         # (3) 재생 중이면 큐에 추가
-        if vc.is_playing():
+        if vc.is_playing() or vc.is_paused():
             self.queue.setdefault(gid, []).append(info)
             await ctx.send(f"➕ 대기열에 추가: `{info.get('title','Unknown')}`")
         else:
@@ -99,41 +137,30 @@ class Music(commands.Cog):
         gid = guild.id
 
         if custom_id in ['pause', 'resume', 'stop', 'skip']:
-            # 재생 전 확인
             if not vc:
                 return await interaction.response.send_message("❌ 봇이 음성 채널에 없습니다.", ephemeral=True)
 
-            # 일시정지
             if custom_id == 'pause' and vc.is_playing():
                 vc.pause()
                 return await interaction.response.send_message("⏸️ 일시정지했습니다.", ephemeral=True)
 
-            # 재개
             if custom_id == 'resume' and vc.is_paused():
                 vc.resume()
                 return await interaction.response.send_message("▶️ 재개했습니다.", ephemeral=True)
 
-            # 정지
             if custom_id == 'stop':
                 vc.stop()
-                # 선택적으로 큐도 비우고 싶다면:
-                # self.queue[gid] = []
+                # self.queue[gid] = []  # 필요시 큐 비우기
                 return await interaction.response.send_message("⏹️ 재생을 중단했습니다.", ephemeral=True)
 
-            # 다음곡
             if custom_id == 'skip':
-                # 큐에 곡이 있는지
                 q = self.queue.get(gid, [])
                 if not q:
                     return await interaction.response.send_message("⚠️ 더 재생할 곡이 없습니다.", ephemeral=True)
 
-                # 현재 재생 중지
                 vc.stop()
-                # 큐 맨 앞 곡 꺼내서 재생
                 next_info = q.pop(0)
-                # 남은 큐 갱신
                 self.queue[gid] = q
-                # 새 곡 재생 및 메시지
                 await interaction.response.send_message(f"⏭️ 다음곡 재생: `{next_info.get('title','Unknown')}`", ephemeral=True)
                 await self._play_track(interaction, next_info)
 

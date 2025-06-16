@@ -17,6 +17,12 @@ class General(commands.Cog):
         """기본 명령어 목록을 보여줍니다."""
         cmds = [c.name for c in self.bot.commands]
         await ctx.send(f"사용 가능한 명령어: {', '.join(cmds)}")
+        
+    @commands.command(name='hello')
+    async def hello(self, ctx: commands.Context):
+        """봇이 인사합니다."""
+        await ctx.send("👋 필승 말도소초 상황병 병장 김보성입니다.")
+        await ctx.send("👋 필승 兵1271期입니다.")
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(General(bot))
