@@ -42,6 +42,7 @@ MrBoBot/
 ```
 
 ## 설치 및 실행 방법
+<<<<<<< HEAD
 1. 이 저장소를 클론합니다:
    ```bash
    git clone https://github.com/yourusername/MrBoBot.git
@@ -64,10 +65,59 @@ MrBoBot/
    DISCORD_BOT_TOKEN=your_discord_bot_token
    ```
 6. 봇을 실행합니다:
+=======
+
+1. **저장소 클론**  
+   ```bash
+   git clone https://github.com/yourusername/MrBoBot.git
+   cd MrBoBot
+   ```
+
+2. **Python 가상환경 생성 및 활성화**  
+   ```bash
+   python -m venv venv
+   # macOS/Linux
+   source venv/bin/activate
+   # Windows
+   venv\Scripts\activate
+   ```
+
+3. **Python 패키지 설치**  
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. **외부 의존성 설치 (FFmpeg)**  
+   - **Ubuntu/Debian**  
+     ```bash
+     sudo apt update
+     sudo apt install ffmpeg
+     ```  
+   - **Windows (Chocolatey 사용)**  
+     ```powershell
+     choco install ffmpeg
+     ```  
+   - **Windows (수동 설치)**  
+     1. [FFmpeg 공식 다운로드 페이지](https://ffmpeg.org/download.html)에서 Windows용 정적 빌드를 내려받습니다.  
+     2. 압축 해제 후 예: `C:\ffmpeg\bin` 경로에 둡니다.  
+     3. 시스템 환경 변수 편집 → `Path` 항목에 `C:\ffmpeg\bin`을 추가합니다.  
+     4. 새 터미널에서 `ffmpeg -version` 명령어로 설치 확인
+
+5. **`.env` 파일 생성 및 토큰 등록**  
+   ```env
+   DISCORD_BOT_TOKEN=your_discord_bot_token
+   ```
+
+6. **봇 실행**  
+>>>>>>> master
    ```bash
    python bot.py
    ```
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> master
 ## 요구사항
 - Python 3.8 이상
 - 디스코드 봇 토큰
