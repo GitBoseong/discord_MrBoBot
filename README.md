@@ -11,7 +11,7 @@ MrBoBot은 디스코드 서버에서 음악을 재생하고 관리할 수 있는
 ## 사용법
 ### 명령어 목록
 - `!play <검색어>`: 유튜브에서 검색어로 음악을 찾아 재생하거나 대기열에 추가합니다.
-- `!playlist`: 현재 대기열에 있는 음악 목록을 출력합니다.
+- `!queue`: 현재 대기열에 있는 음악 목록을 출력합니다.
 - `!remove <번호>`: 대기열에서 특정 번호에 해당하는 음악을 삭제합니다.
 - `!stop`: 현재 재생 중인 음악을 정지합니다.
 - `!pause`: 현재 재생 중인 음악을 일시 정지합니다.
@@ -64,52 +64,6 @@ MrBoBot/
    DISCORD_BOT_TOKEN=your_discord_bot_token
    ```
 6. 봇을 실행합니다:
-
-1. **저장소 클론**  
-   ```bash
-   git clone https://github.com/yourusername/MrBoBot.git
-   cd MrBoBot
-   ```
-
-2. **Python 가상환경 생성 및 활성화**  
-   ```bash
-   python -m venv venv
-   # macOS/Linux
-   source venv/bin/activate
-   # Windows
-   venv\Scripts\activate
-   ```
-
-3. **Python 패키지 설치**  
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **외부 의존성 설치 (FFmpeg)**  
-   - **Ubuntu/Debian**  
-     ```bash
-     sudo apt update
-     sudo apt install ffmpeg
-     ```  
-   - **Windows (Chocolatey 사용)**  
-     ```powershell
-     choco install ffmpeg
-     ```  
-   - **Windows (수동 설치)**  
-     1. [FFmpeg 공식 다운로드 페이지](https://ffmpeg.org/download.html)에서 Windows용 정적 빌드를 내려받습니다.  
-     2. 압축 해제 후 예: `C:\ffmpeg\bin` 경로에 둡니다.  
-     3. 시스템 환경 변수 편집 → `Path` 항목에 `C:\ffmpeg\bin`을 추가합니다.  
-     4. 새 터미널에서 `ffmpeg -version` 명령어로 설치 확인
-
-5. **`.env` 파일 생성 및 토큰 등록**  
-   ```env
-   DISCORD_BOT_TOKEN=your_discord_bot_token
-   ```
-
-6. **봇 실행**  
-   ```bash
-   python bot.py
-   ```
 
 ## 요구사항
 - Python 3.8 이상
