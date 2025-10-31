@@ -42,7 +42,6 @@ MrBoBot/
 ```
 
 ## 설치 및 실행 방법
-<<<<<<< HEAD
 1. 이 저장소를 클론합니다:
    ```bash
    git clone https://github.com/yourusername/MrBoBot.git
@@ -65,7 +64,6 @@ MrBoBot/
    DISCORD_BOT_TOKEN=your_discord_bot_token
    ```
 6. 봇을 실행합니다:
-=======
 
 1. **저장소 클론**  
    ```bash
@@ -109,15 +107,10 @@ MrBoBot/
    ```
 
 6. **봇 실행**  
->>>>>>> master
    ```bash
    python bot.py
    ```
 
-<<<<<<< HEAD
-=======
-
->>>>>>> master
 ## 요구사항
 - Python 3.8 이상
 - 디스코드 봇 토큰
