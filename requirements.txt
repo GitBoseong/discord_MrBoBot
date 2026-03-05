@@ -1,5 +1,5 @@
-discord.py
+discord.py[voice]
 PyNaCl
+davey
 yt-dlp
 python-dotenv
-

@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Discord
-DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
 # FFmpeg 옵션
 FFMPEG_OPTIONS = {

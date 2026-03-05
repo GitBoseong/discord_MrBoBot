@@ -13,10 +13,14 @@ intents.voice_states = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-@bot.event
-async def on_ready():
-    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
-    print("------")
+# 디버깅을 위해 로깅 설정 (선택 사항)
+# import logging
+# discord.utils.setup_logging(level=logging.DEBUG)
+
+# @bot.event
+# async def on_ready():
+#     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+#     print("------")
 
 async def load_cogs():
     # cogs 디렉터리에서 모든 .py 파일을 찾아 자동으로 로드합니다.
