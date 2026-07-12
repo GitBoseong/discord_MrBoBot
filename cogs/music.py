@@ -111,10 +111,18 @@ class Music(commands.Cog):
         view: Optional[View] = None,
         ephemeral: bool = False,
     ) -> None:
+        kwargs = {"ephemeral": ephemeral}
+        if content is not None:
+            kwargs["content"] = content
+        if embed is not None:
+            kwargs["embed"] = embed
+        if view is not None:
+            kwargs["view"] = view
+
         if interaction.response.is_done():
-            await interaction.followup.send(content=content, embed=embed, view=view, ephemeral=ephemeral)
+            await interaction.followup.send(**kwargs)
         else:
-            await interaction.response.send_message(content=content, embed=embed, view=view, ephemeral=ephemeral)
+            await interaction.response.send_message(**kwargs)
 
     async def _load_track(self, query: str, requester: discord.abc.User) -> Track:
         info = await asyncio.to_thread(get_youtube_info, query)
