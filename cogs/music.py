@@ -190,7 +190,7 @@ class Music(commands.Cog):
 
         source = discord.FFmpegPCMAudio(track.stream_url, **FFMPEG_OPTIONS)
         voice_client.play(source, after=after_play)
-        await self._send_or_edit_nowplaying(guild, paused=False)
+        await self._send_nowplaying(guild, paused=False)
         await self._set_presence(track)
 
     async def _play_next(self, guild: discord.Guild) -> None:
@@ -203,7 +203,7 @@ class Music(commands.Cog):
 
             if not state.queue:
                 state.touch()
-                await self._send_or_edit_nowplaying(guild, paused=False)
+                await self._update_nowplaying(guild, paused=False)
                 return
 
             next_track = state.queue.pop(0)
@@ -253,25 +253,27 @@ class Music(commands.Cog):
         embed.set_footer(text="일시정지됨" if paused else "재생 중")
         return embed
 
-    async def _send_or_edit_nowplaying(self, guild: discord.Guild, paused: bool = False) -> None:
+    async def _send_nowplaying(self, guild: discord.Guild, paused: bool = False) -> None:
         state = self.state_for(guild.id)
         if not state.text_channel:
             return
 
         embed = self._player_embed(guild, paused)
         view = PlayerControls(self, guild.id, paused=paused)
+        state.now_message = await state.text_channel.send(embed=embed, view=view)
 
+    async def _update_nowplaying(self, guild: discord.Guild, paused: bool = False) -> None:
+        state = self.state_for(guild.id)
         if state.now_message:
             try:
+                embed = self._player_embed(guild, paused)
+                view = PlayerControls(self, guild.id, paused=paused)
                 await state.now_message.edit(embed=embed, view=view)
                 return
             except discord.HTTPException:
                 state.now_message = None
 
-        state.now_message = await state.text_channel.send(embed=embed, view=view)
-
-    async def _update_nowplaying(self, guild: discord.Guild, paused: bool = False) -> None:
-        await self._send_or_edit_nowplaying(guild, paused=paused)
+        await self._send_nowplaying(guild, paused=paused)
 
     async def pause_player(self, interaction: discord.Interaction) -> None:
         voice_client = interaction.guild.voice_client if interaction.guild else None
