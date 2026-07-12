@@ -1,347 +1,585 @@
-# cogs/music.py
-
-import os
 import asyncio
-from typing import Dict, List
-from datetime import timedelta
+import random
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence
 
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
-from discord import FFmpegPCMAudio
-from discord.ui import View, Button
+from discord.ui import Button, Select, View
 
 from config import FFMPEG_OPTIONS
-from utils.youtube import search_youtube_info
-
 from utils.formatting import clamp_title, fmt_duration
-from discord.ui import View, button
+from utils.youtube import get_youtube_info, search_youtube
 
 
-def utcnow():
-    # discord.utils.utcnow()가 권장됨 (discord.py 2.x)
-    return discord.utils.utcnow()
+AUTO_LEAVE_SECONDS = 180
+MAX_QUEUE_DISPLAY = 10
+
+
+@dataclass
+class Track:
+    title: str
+    stream_url: str
+    webpage_url: str
+    thumbnail: Optional[str]
+    duration: Optional[int]
+    requester_id: int
+    requester_name: str
+    query: str
+
+    @classmethod
+    def from_info(cls, info: dict, requester: discord.abc.User, query: str) -> "Track":
+        return cls(
+            title=info.get("title") or "Unknown title",
+            stream_url=info.get("url") or "",
+            webpage_url=info.get("webpage_url") or info.get("original_url") or query,
+            thumbnail=info.get("thumbnail"),
+            duration=info.get("duration"),
+            requester_id=requester.id,
+            requester_name=requester.display_name,
+            query=query,
+        )
+
+
+class GuildMusicState:
+    def __init__(self) -> None:
+        self.queue: List[Track] = []
+        self.current: Optional[Track] = None
+        self.now_message: Optional[discord.Message] = None
+        self.text_channel: Optional[discord.abc.Messageable] = None
+        self.last_active = discord.utils.utcnow()
+        self.lock = asyncio.Lock()
+
+    def touch(self) -> None:
+        self.last_active = discord.utils.utcnow()
 
 
 class Music(commands.Cog):
-    """음악 재생 + 자동 나가기(3분 무활동, 혼자 남으면 즉시 종료)"""
+    """Music playback, YouTube search, queue management, and player controls."""
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-
-        # guild.id -> queue(list[info])
-        self.queue: Dict[int, List[dict]] = {}
-
-        # guild.id -> 마지막 활동 시각
-        self.last_active: Dict[int, discord.utils.datetime] = {}
-
-        # 자동 나가기 타임아웃(초). .env 에서 AUTO_LEAVE_SECONDS로 조절 가능 (기본 180)
-        self.inactive_timeout = int(os.getenv("AUTO_LEAVE_SECONDS", "180"))
-
-        # 주기적 점검 태스크 시작
+        self.states: Dict[int, GuildMusicState] = {}
+        self.inactive_timeout = AUTO_LEAVE_SECONDS
         self._auto_leave_task.start()
-        self.now_msg: Dict[int, discord.Message] = {}   # 길드별 NowPlaying 메시지
-        self.current: Dict[int, dict] = {}              # 현재 트랙 info
-        self.started_at: Dict[int, discord.utils.datetime] = {}  # 시작 시각(선택)
 
+    def cog_unload(self) -> None:
+        self._auto_leave_task.cancel()
 
-    # ----------------------------
-    # 내부 유틸
-    # ----------------------------
-    def _touch_activity(self, guild_id: int) -> None:
-        self.last_active[guild_id] = utcnow()
+    def state_for(self, guild_id: int) -> GuildMusicState:
+        if guild_id not in self.states:
+            self.states[guild_id] = GuildMusicState()
+        return self.states[guild_id]
 
-    def _inactive_for(self, guild_id: int) -> float:
-        last = self.last_active.get(guild_id)
-        if not last:
-            return float("inf")
-        return (utcnow() - last).total_seconds()
+    async def cog_app_command_error(
+        self, interaction: discord.Interaction, error: app_commands.AppCommandError
+    ) -> None:
+        message = f"명령 처리 중 문제가 생겼어요: {error}"
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
 
-    async def _disconnect_if_inactive(self, vc: discord.VoiceClient):
-        """무활동 시간이 임계치 초과 시 또는 혼자 남으면 종료"""
-        guild = vc.guild
-        gid = guild.id
+    async def ensure_voice(self, interaction: discord.Interaction) -> Optional[discord.VoiceClient]:
+        if not interaction.guild:
+            await self._reply(interaction, "서버 안에서만 사용할 수 있어요.", ephemeral=True)
+            return None
 
-        # 1) 채널에 혼자 남았으면 즉시 나가기
-        #    (유저가 모두 나간 경우)
-        if vc.channel and len([m for m in vc.channel.members if not m.bot]) == 0:
-            await vc.disconnect()
-            print(f"[AutoLeave] {guild.name}: 채널에 유저 없음 → 즉시 나감")
+        user = interaction.user
+        if not isinstance(user, discord.Member) or not user.voice or not user.voice.channel:
+            await self._reply(interaction, "먼저 음성 채널에 들어가 주세요.", ephemeral=True)
+            return None
+
+        voice_client = interaction.guild.voice_client
+        if voice_client and voice_client.channel != user.voice.channel:
+            await voice_client.move_to(user.voice.channel)
+            return voice_client
+
+        if not voice_client:
+            voice_client = await user.voice.channel.connect()
+
+        self.state_for(interaction.guild.id).touch()
+        return voice_client
+
+    async def _reply(
+        self,
+        interaction: discord.Interaction,
+        content: Optional[str] = None,
+        *,
+        embed: Optional[discord.Embed] = None,
+        view: Optional[View] = None,
+        ephemeral: bool = False,
+    ) -> None:
+        if interaction.response.is_done():
+            await interaction.followup.send(content=content, embed=embed, view=view, ephemeral=ephemeral)
+        else:
+            await interaction.response.send_message(content=content, embed=embed, view=view, ephemeral=ephemeral)
+
+    async def _load_track(self, query: str, requester: discord.abc.User) -> Track:
+        info = await asyncio.to_thread(get_youtube_info, query)
+        return Track.from_info(info, requester, query)
+
+    async def _search_tracks(
+        self, query: str, requester: discord.abc.User, limit: int = 5
+    ) -> List[Track]:
+        infos = await asyncio.to_thread(search_youtube, query, limit)
+        return [Track.from_info(info, requester, query) for info in infos if info and info.get("url")]
+
+    async def enqueue_or_play(
+        self, interaction: discord.Interaction, track: Track, *, announce: bool = True
+    ) -> None:
+        if not interaction.guild:
             return
 
-        # 2) 재생/일시정지 모두 아닌 상태가 일정 시간 지속되면 나가기
-        if not vc.is_playing() and not vc.is_paused():
-            if self._inactive_for(gid) > self.inactive_timeout:
-                await vc.disconnect()
-                print(f"[AutoLeave] {guild.name}: {self.inactive_timeout}s 무활동 → 자동 나감")
+        voice_client = await self.ensure_voice(interaction)
+        if not voice_client:
+            return
 
-    # ----------------------------
-    # 주기 태스크
-    # ----------------------------
-    @tasks.loop(seconds=15)
-    async def _auto_leave_task(self):
-        """15초마다 모든 길드의 보이스 상태 확인"""
-        for vc in list(self.bot.voice_clients):
-            try:
-                await self._disconnect_if_inactive(vc)
-            except Exception as e:
-                print(f"[AutoLeave] 점검 중 오류: {e}")
+        state = self.state_for(interaction.guild.id)
+        state.text_channel = interaction.channel
 
-    @_auto_leave_task.before_loop
-    async def _before_auto_leave(self):
-        await self.bot.wait_until_ready()
+        async with state.lock:
+            if voice_client.is_playing() or voice_client.is_paused() or state.current:
+                state.queue.append(track)
+                state.touch()
+                if announce:
+                    await self._reply(
+                        interaction,
+                        f"큐에 추가했어요: **{clamp_title(track.title)}** "
+                        f"(`{fmt_duration(track.duration)}`)",
+                    )
+                await self._update_nowplaying(interaction.guild)
+                return
 
-    # ----------------------------
-    # 재생 / 큐
-    # ----------------------------
-    async def _play_track(self, interaction_or_ctx, info: dict, *, new_request=False):
-        # 컨텍스트 분기
-        if isinstance(interaction_or_ctx, discord.Interaction):
-            guild = interaction_or_ctx.guild
-            channel = interaction_or_ctx.channel
-            user = interaction_or_ctx.user
-        else:
-            guild = interaction_or_ctx.guild
-            channel = interaction_or_ctx.channel
-            user = interaction_or_ctx.author
+            if announce and not interaction.response.is_done():
+                await interaction.response.defer()
+            await self._start_track(interaction.guild, voice_client, track, state)
+            if announce:
+                await self._reply(
+                    interaction,
+                    f"재생할게요: **{clamp_title(track.title)}** (`{fmt_duration(track.duration)}`)",
+                )
 
-        gid = guild.id
-        vc = guild.voice_client
+    async def _start_track(
+        self,
+        guild: discord.Guild,
+        voice_client: discord.VoiceClient,
+        track: Track,
+        state: GuildMusicState,
+    ) -> None:
+        if not track.stream_url:
+            refreshed = await asyncio.to_thread(get_youtube_info, track.webpage_url or track.query)
+            track.stream_url = refreshed.get("url") or track.stream_url
 
-        # 요청자 표시 저장
-        info["requester_mention"] = user.mention
-        self.current[gid] = info
+        state.current = track
+        state.touch()
 
-        # after 콜백: 다음 곡 재생 예약
-        def _after_play(error):
+        def after_play(error: Optional[Exception]) -> None:
             if error:
-                print(f"[Music] 플레이 중 에러: {error}")
-            self._touch_activity(gid)
-            asyncio.run_coroutine_threadsafe(self._play_next(interaction_or_ctx), self.bot.loop)
+                print(f"[Music] playback error in {guild.name}: {error}")
+            asyncio.run_coroutine_threadsafe(self._play_next(guild), self.bot.loop)
 
-        vc.play(FFmpegPCMAudio(info['url'], **FFMPEG_OPTIONS), after=_after_play)
+        source = discord.FFmpegPCMAudio(track.stream_url, **FFMPEG_OPTIONS)
+        voice_client.play(source, after=after_play)
+        await self._send_or_edit_nowplaying(guild, paused=False)
+        await self._set_presence(track)
 
-        # 재생 시작 시점 활동 갱신
-        self._touch_activity(gid)
+    async def _play_next(self, guild: discord.Guild) -> None:
+        state = self.state_for(guild.id)
+        async with state.lock:
+            state.current = None
+            voice_client = guild.voice_client
+            if not voice_client:
+                return
 
-        # ▶ NowPlaying 카드: 새 요청이면 새 메시지, 자동이면 edit
-        embed, view = self._build_nowplaying(guild, info, paused=False)
+            if not state.queue:
+                state.touch()
+                await self._send_or_edit_nowplaying(guild, paused=False)
+                return
 
-        if new_request:  # 새 요청이면 항상 새 메시지 생성
-            self.now_msg[gid] = await channel.send(embed=embed, view=view)
-        else:
-            prev = self.now_msg.get(gid)
-            if prev:
-                try:
-                    await prev.edit(embed=embed, view=view)
-                except discord.HTTPException:
-                    self.now_msg[gid] = await channel.send(embed=embed, view=view)
+            next_track = state.queue.pop(0)
+            await self._start_track(guild, voice_client, next_track, state)
+
+    async def _set_presence(self, track: Optional[Track]) -> None:
+        try:
+            if track:
+                await self.bot.change_presence(
+                    activity=discord.Activity(
+                        type=discord.ActivityType.listening,
+                        name=clamp_title(track.title, 48),
+                    )
+                )
             else:
-                self.now_msg[gid] = await channel.send(embed=embed, view=view)
-
-        # 상태표시(현재 곡 제목)
-        try:
-            await self.bot.change_presence(
-                activity=discord.Activity(type=discord.ActivityType.listening, name=info.get("title", "Music"))
-            )
-        except Exception:
-            pass
-
-    async def _play_next(self, interaction_or_ctx):
-        """트랙 종료 후 큐에서 다음 곡 재생"""
-        guild = interaction_or_ctx.guild if isinstance(interaction_or_ctx, discord.Interaction) else interaction_or_ctx.guild
-        gid = guild.id
-        q = self.queue.get(gid, [])
-        if not q:
-            # 큐가 비었으면 활동 시간만 갱신(대기 시작)
-            self._touch_activity(gid)
-            return
-        next_info = q.pop(0)
-        self.queue[gid] = q
-        # 다음 곡 재생 시도 (새 메시지로 표시)
-        await self._play_track(interaction_or_ctx, next_info, new_request=True)
-        
-    async def ctrl_pause(self, interaction: discord.Interaction):
-        vc = interaction.guild.voice_client if interaction.guild else None
-        if vc and vc.is_playing():
-            vc.pause()
-            self._touch_activity(interaction.guild.id)
-            await interaction.response.send_message("⏸️ 일시정지했습니다.", ephemeral=True)
-            await self._update_nowplaying(interaction.guild, paused=True)
-
-    async def ctrl_resume(self, interaction: discord.Interaction):
-        vc = interaction.guild.voice_client if interaction.guild else None
-        if vc and vc.is_paused():
-            vc.resume()
-            self._touch_activity(interaction.guild.id)
-            await interaction.response.send_message("▶️ 재개했습니다.", ephemeral=True)
-            await self._update_nowplaying(interaction.guild, paused=False)
-
-    async def ctrl_stop(self, interaction: discord.Interaction):
-        vc = interaction.guild.voice_client if interaction.guild else None
-        if vc:
-            vc.stop()
-            self._touch_activity(interaction.guild.id)
-            await interaction.response.send_message("⏹️ 재생을 중단했습니다.", ephemeral=True)
-            await self._update_nowplaying(interaction.guild, paused=False)
-
-    async def ctrl_skip(self, interaction: discord.Interaction):
-        guild = interaction.guild
-        gid = guild.id
-        q = self.queue.get(gid, [])
-        if not q:
-            return await interaction.response.send_message("⚠️ 더 재생할 곡이 없습니다.", ephemeral=True)
-        vc = guild.voice_client
-        if vc:
-            vc.stop()  # after에서 _play_next 호출됨
-        self._touch_activity(gid)
-        await interaction.response.send_message("⏭️ 다음곡으로 넘어갑니다.", ephemeral=True)
-
-
-    # ----------------------------
-    # 명령어
-    # ----------------------------
-    @commands.command(name='join')
-    async def join(self, ctx: commands.Context):
-        """봇을 음성 채널에 참여시킵니다."""
-        if ctx.author.voice and ctx.author.voice.channel:
-            vc = ctx.voice_client
-            if not vc:
-                vc = await ctx.author.voice.channel.connect()
-            await ctx.send(f"✅ 연결됨: {vc.channel}")
-            self._touch_activity(ctx.guild.id)
-        else:
-            await ctx.send("❌ 음성 채널에 먼저 들어가 있어야 합니다.")
-
-    @commands.command(name='leave')
-    async def leave(self, ctx: commands.Context):
-        """봇을 음성 채널에서 나가게 합니다."""
-        vc = ctx.voice_client
-        if vc:
-            await vc.disconnect()
-            await ctx.send("👋 나갔습니다.")
-        else:
-            await ctx.send("❌ 봇이 음성 채널에 없습니다.")
-
-    @commands.command(name='play')
-    async def play(self, ctx: commands.Context, *, query: str = None):
-        """!play <검색어> 또는 <URL>"""
-        if query is None:
-            return await ctx.send("❌ 사용법: `!play <검색어>`")
-
-        # 음성 채널 연결 보장
-        if not ctx.voice_client:
-            await ctx.author.voice.channel.connect()
-        vc = ctx.voice_client
-        gid = ctx.guild.id
-
-        info = search_youtube_info(query)
-
-        if vc.is_playing() or vc.is_paused():
-            self.queue.setdefault(gid, []).append(info)
-            await ctx.send(f"➕ 대기열에 추가: `{info.get('title','Unknown')}`")
-            # 활동 갱신
-            self._touch_activity(gid)
-        else:
-            await self._play_track(ctx, info, new_request=True)
-
-    @commands.command(name='queue')
-    async def _queue(self, ctx: commands.Context):
-        q = self.queue.get(ctx.guild.id, [])
-        if q:
-            msg = '\n'.join(f"{i+1}. {item.get('title','Unknown')}" for i, item in enumerate(q))
-            await ctx.send(f"🎵 대기열:\n{msg}")
-        else:
-            await ctx.send("대기열이 비어있습니다.")
-        self._touch_activity(ctx.guild.id)
-
-    @commands.command(name='clear')
-    async def clear(self, ctx: commands.Context):
-        self.queue[ctx.guild.id] = []
-        await ctx.send("🗑️ 대기열을 비웠습니다.")
-        self._touch_activity(ctx.guild.id)
-
-    # ----------------------------
-    # 음성 상태 이벤트: 혼자 남으면 즉시 나가기
-    # ----------------------------
-    @commands.Cog.listener()
-    async def on_voice_state_update(self, member: discord.Member, before, after):
-        # 유저가 나가거나 이동했을 때 체크 (봇은 무시)
-        if member.bot:
-            return
-        guild = member.guild
-        vc = guild.voice_client
-        if not vc or not vc.channel:
-            return
-        try:
-            # 채널에 봇만 남았으면 즉시 나가기
-            if len([m for m in vc.channel.members if not m.bot]) == 0:
-                await vc.disconnect()
-                print(f"[AutoLeave] {guild.name}: 유저 없음 감지 → 즉시 나감")
-        except Exception as e:
-            print(f"[AutoLeave] on_voice_state_update 오류: {e}")
-
-    def _build_nowplaying(self, guild: discord.Guild, info: dict, paused: bool = False) -> tuple[discord.Embed, View]:
-        title = clamp_title(info.get("title", "Unknown"))
-        yt_id = info.get("id")
-        url = f"https://youtu.be/{yt_id}" if yt_id else info.get("url")
-        thumb = info.get("thumbnail")
-        requester = info.get("requester_mention", "Unknown")
-
-        embed = discord.Embed(title=title, url=url, color=0x5865F2)
-        if thumb:
-            embed.set_thumbnail(url=thumb)
-        embed.add_field(name="🎧 요청자", value=requester, inline=True)
-        # info.get("duration") 있으면 초 단위로 넣어두세요(없어도 동작)
-        embed.add_field(name="⏱ 길이", value=fmt_duration(info.get("duration")), inline=True)
-
-        qlen = len(self.queue.get(guild.id, []))
-        state = "일시정지" if paused else "재생 중"
-        embed.set_footer(text=f"{state} · 대기열 {qlen}곡")
-
-        view = PlayerControls(self, guild.id, paused=paused)
-        return embed, view
-
-    async def _update_nowplaying(self, guild: discord.Guild, paused: bool = False):
-        msg = self.now_msg.get(guild.id)
-        info = self.current.get(guild.id)
-        if not (msg and info):
-            return
-        embed, view = self._build_nowplaying(guild, info, paused=paused)
-        try:
-            await msg.edit(embed=embed, view=view)
+                await self.bot.change_presence(activity=None)
         except discord.HTTPException:
             pass
 
-    
-async def setup(bot: commands.Bot):
-    await bot.add_cog(Music(bot))
+    def _player_embed(self, guild: discord.Guild, paused: bool = False) -> discord.Embed:
+        state = self.state_for(guild.id)
+        track = state.current
+
+        if not track:
+            embed = discord.Embed(title="재생 대기 중", description="큐가 비어 있어요.", color=0x2ECC71)
+            embed.set_footer(text="음악을 찾으려면 /play 또는 /search 를 사용하세요.")
+            return embed
+
+        embed = discord.Embed(
+            title=clamp_title(track.title),
+            url=track.webpage_url,
+            color=0x5865F2,
+        )
+        if track.thumbnail:
+            embed.set_thumbnail(url=track.thumbnail)
+        embed.add_field(name="요청자", value=track.requester_name, inline=True)
+        embed.add_field(name="길이", value=fmt_duration(track.duration), inline=True)
+        embed.add_field(name="큐", value=f"{len(state.queue)}곡 대기 중", inline=True)
+
+        if state.queue:
+            upcoming = "\n".join(
+                f"`{idx}.` {clamp_title(item.title, 55)}"
+                for idx, item in enumerate(state.queue[:5], start=1)
+            )
+            embed.add_field(name="다음 곡", value=upcoming, inline=False)
+
+        embed.set_footer(text="일시정지됨" if paused else "재생 중")
+        return embed
+
+    async def _send_or_edit_nowplaying(self, guild: discord.Guild, paused: bool = False) -> None:
+        state = self.state_for(guild.id)
+        if not state.text_channel:
+            return
+
+        embed = self._player_embed(guild, paused)
+        view = PlayerControls(self, guild.id, paused=paused)
+
+        if state.now_message:
+            try:
+                await state.now_message.edit(embed=embed, view=view)
+                return
+            except discord.HTTPException:
+                state.now_message = None
+
+        state.now_message = await state.text_channel.send(embed=embed, view=view)
+
+    async def _update_nowplaying(self, guild: discord.Guild, paused: bool = False) -> None:
+        await self._send_or_edit_nowplaying(guild, paused=paused)
+
+    async def pause_player(self, interaction: discord.Interaction) -> None:
+        voice_client = interaction.guild.voice_client if interaction.guild else None
+        if not voice_client or not voice_client.is_playing():
+            await self._reply(interaction, "지금 재생 중인 곡이 없어요.", ephemeral=True)
+            return
+        voice_client.pause()
+        self.state_for(interaction.guild.id).touch()
+        await self._reply(interaction, "일시정지했어요.", ephemeral=True)
+        await self._update_nowplaying(interaction.guild, paused=True)
+
+    async def resume_player(self, interaction: discord.Interaction) -> None:
+        voice_client = interaction.guild.voice_client if interaction.guild else None
+        if not voice_client or not voice_client.is_paused():
+            await self._reply(interaction, "일시정지된 곡이 없어요.", ephemeral=True)
+            return
+        voice_client.resume()
+        self.state_for(interaction.guild.id).touch()
+        await self._reply(interaction, "다시 재생할게요.", ephemeral=True)
+        await self._update_nowplaying(interaction.guild, paused=False)
+
+    async def skip_player(self, interaction: discord.Interaction) -> None:
+        voice_client = interaction.guild.voice_client if interaction.guild else None
+        if not voice_client or not (voice_client.is_playing() or voice_client.is_paused()):
+            await self._reply(interaction, "넘길 곡이 없어요.", ephemeral=True)
+            return
+        voice_client.stop()
+        self.state_for(interaction.guild.id).touch()
+        await self._reply(interaction, "다음 곡으로 넘겼어요.", ephemeral=True)
+
+    async def stop_player(self, interaction: discord.Interaction) -> None:
+        if not interaction.guild:
+            return
+        voice_client = interaction.guild.voice_client
+        state = self.state_for(interaction.guild.id)
+        state.queue.clear()
+        state.current = None
+        state.touch()
+
+        if voice_client:
+            voice_client.stop()
+            await voice_client.disconnect()
+
+        await self._set_presence(None)
+        await self._reply(interaction, "재생을 멈추고 큐를 비웠어요.", ephemeral=True)
+        await self._update_nowplaying(interaction.guild)
+
+    async def show_queue(self, interaction: discord.Interaction, *, ephemeral: bool = False) -> None:
+        if not interaction.guild:
+            return
+        state = self.state_for(interaction.guild.id)
+        embed = discord.Embed(title="음악 큐", color=0x2ECC71)
+
+        if state.current:
+            embed.add_field(
+                name="지금 재생",
+                value=f"{clamp_title(state.current.title, 70)} (`{fmt_duration(state.current.duration)}`)",
+                inline=False,
+            )
+
+        if state.queue:
+            rows = []
+            for idx, track in enumerate(state.queue[:MAX_QUEUE_DISPLAY], start=1):
+                rows.append(f"`{idx}.` {clamp_title(track.title, 60)} (`{fmt_duration(track.duration)}`)")
+            if len(state.queue) > MAX_QUEUE_DISPLAY:
+                rows.append(f"...외 {len(state.queue) - MAX_QUEUE_DISPLAY}곡")
+            embed.add_field(name="대기열", value="\n".join(rows), inline=False)
+        else:
+            embed.add_field(name="대기열", value="비어 있어요.", inline=False)
+
+        view = QueueControls(self, interaction.guild.id) if state.queue else None
+        await self._reply(interaction, embed=embed, view=view, ephemeral=ephemeral)
+
+    @tasks.loop(seconds=15)
+    async def _auto_leave_task(self) -> None:
+        for voice_client in list(self.bot.voice_clients):
+            guild = voice_client.guild
+            state = self.state_for(guild.id)
+            humans = [member for member in voice_client.channel.members if not member.bot]
+
+            if not humans:
+                await voice_client.disconnect()
+                state.current = None
+                state.queue.clear()
+                state.touch()
+                continue
+
+            inactive_for = (discord.utils.utcnow() - state.last_active).total_seconds()
+            if not voice_client.is_playing() and not voice_client.is_paused() and inactive_for > self.inactive_timeout:
+                await voice_client.disconnect()
+                state.current = None
+
+    @_auto_leave_task.before_loop
+    async def _before_auto_leave(self) -> None:
+        await self.bot.wait_until_ready()
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ) -> None:
+        if member.bot:
+            return
+        voice_client = member.guild.voice_client
+        if not voice_client or not voice_client.channel:
+            return
+        humans = [item for item in voice_client.channel.members if not item.bot]
+        if not humans:
+            state = self.state_for(member.guild.id)
+            state.queue.clear()
+            state.current = None
+            await voice_client.disconnect()
+
+    @app_commands.command(name="play", description="YouTube URL 또는 검색어로 음악을 재생합니다.")
+    @app_commands.describe(query="검색어 또는 YouTube URL")
+    async def slash_play(self, interaction: discord.Interaction, query: str) -> None:
+        await interaction.response.defer()
+        track = await self._load_track(query, interaction.user)
+        await self.enqueue_or_play(interaction, track, announce=True)
+
+    @app_commands.command(name="search", description="YouTube 검색 결과에서 골라 재생합니다.")
+    @app_commands.describe(query="검색어")
+    async def slash_search(self, interaction: discord.Interaction, query: str) -> None:
+        await interaction.response.defer(ephemeral=True)
+        tracks = await self._search_tracks(query, interaction.user)
+        if not tracks:
+            await interaction.followup.send("검색 결과를 찾지 못했어요.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="검색 결과",
+            description="재생할 곡을 선택하세요.",
+            color=0x5865F2,
+        )
+        for idx, track in enumerate(tracks, start=1):
+            embed.add_field(
+                name=f"{idx}. {clamp_title(track.title, 55)}",
+                value=fmt_duration(track.duration),
+                inline=False,
+            )
+        await interaction.followup.send(
+            embed=embed,
+            view=SearchResults(self, interaction.guild_id, tracks),
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="queue", description="현재 재생 중인 곡과 대기열을 봅니다.")
+    async def slash_queue(self, interaction: discord.Interaction) -> None:
+        await self.show_queue(interaction)
+
+    @app_commands.command(name="now", description="현재 재생 중인 곡을 표시합니다.")
+    async def slash_now(self, interaction: discord.Interaction) -> None:
+        if not interaction.guild:
+            return
+        embed = self._player_embed(interaction.guild)
+        await self._reply(interaction, embed=embed)
+
+    @app_commands.command(name="pause", description="현재 곡을 일시정지합니다.")
+    async def slash_pause(self, interaction: discord.Interaction) -> None:
+        await self.pause_player(interaction)
+
+    @app_commands.command(name="resume", description="일시정지된 곡을 다시 재생합니다.")
+    async def slash_resume(self, interaction: discord.Interaction) -> None:
+        await self.resume_player(interaction)
+
+    @app_commands.command(name="skip", description="현재 곡을 넘깁니다.")
+    async def slash_skip(self, interaction: discord.Interaction) -> None:
+        await self.skip_player(interaction)
+
+    @app_commands.command(name="stop", description="재생을 멈추고 음성 채널에서 나갑니다.")
+    async def slash_stop(self, interaction: discord.Interaction) -> None:
+        await self.stop_player(interaction)
+
+    @app_commands.command(name="clear", description="대기열을 모두 비웁니다.")
+    async def slash_clear(self, interaction: discord.Interaction) -> None:
+        if not interaction.guild:
+            return
+        state = self.state_for(interaction.guild.id)
+        state.queue.clear()
+        state.touch()
+        await self._reply(interaction, "큐를 비웠어요.", ephemeral=True)
+        await self._update_nowplaying(interaction.guild)
+
+    @app_commands.command(name="remove", description="대기열에서 특정 번호의 곡을 제거합니다.")
+    @app_commands.describe(index="큐 번호")
+    async def slash_remove(self, interaction: discord.Interaction, index: app_commands.Range[int, 1, 100]) -> None:
+        if not interaction.guild:
+            return
+        state = self.state_for(interaction.guild.id)
+        if index > len(state.queue):
+            await self._reply(interaction, "해당 번호의 곡이 큐에 없어요.", ephemeral=True)
+            return
+        removed = state.queue.pop(index - 1)
+        state.touch()
+        await self._reply(interaction, f"제거했어요: **{clamp_title(removed.title)}**", ephemeral=True)
+        await self._update_nowplaying(interaction.guild)
+
+    @app_commands.command(name="shuffle", description="대기열 순서를 섞습니다.")
+    async def slash_shuffle(self, interaction: discord.Interaction) -> None:
+        if not interaction.guild:
+            return
+        state = self.state_for(interaction.guild.id)
+        if len(state.queue) < 2:
+            await self._reply(interaction, "섞을 곡이 충분하지 않아요.", ephemeral=True)
+            return
+        random.shuffle(state.queue)
+        state.touch()
+        await self._reply(interaction, "큐를 섞었어요.", ephemeral=True)
+        await self._update_nowplaying(interaction.guild)
 
 
 class PlayerControls(View):
-    """재생 컨트롤 View: 콜백을 Music Cog 메서드로 위임"""
-    def __init__(self, cog: "Music", guild_id: int, paused: bool):
-        super().__init__(timeout=None)
+    def __init__(self, cog: Music, guild_id: int, paused: bool = False) -> None:
+        super().__init__(timeout=600)
         self.cog = cog
         self.guild_id = guild_id
-        # 버튼 상태 토글
+
         for child in self.children:
-            if isinstance(child, discord.ui.Button):
-                if child.custom_id == "ctrl_pause":
+            if isinstance(child, Button):
+                if child.custom_id == "music:pause":
                     child.disabled = paused
-                elif child.custom_id == "ctrl_resume":
+                elif child.custom_id == "music:resume":
                     child.disabled = not paused
 
-    @button(label="⏸️ 일시정지", style=discord.ButtonStyle.secondary, custom_id="ctrl_pause")
-    async def _pause(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.ctrl_pause(interaction)
+    @discord.ui.button(label="일시정지", style=discord.ButtonStyle.secondary, custom_id="music:pause")
+    async def pause(self, interaction: discord.Interaction, button: Button) -> None:
+        await self.cog.pause_player(interaction)
 
-    @button(label="▶️ 재개", style=discord.ButtonStyle.secondary, custom_id="ctrl_resume")
-    async def _resume(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.ctrl_resume(interaction)
+    @discord.ui.button(label="다시 재생", style=discord.ButtonStyle.secondary, custom_id="music:resume")
+    async def resume(self, interaction: discord.Interaction, button: Button) -> None:
+        await self.cog.resume_player(interaction)
 
-    @button(label="⏹️ 정지", style=discord.ButtonStyle.danger, custom_id="ctrl_stop")
-    async def _stop(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.ctrl_stop(interaction)
+    @discord.ui.button(label="넘기기", style=discord.ButtonStyle.primary, custom_id="music:skip")
+    async def skip(self, interaction: discord.Interaction, button: Button) -> None:
+        await self.cog.skip_player(interaction)
 
-    @button(label="⏭️ 다음곡", style=discord.ButtonStyle.primary, custom_id="ctrl_skip")
-    async def _skip(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.ctrl_skip(interaction)
+    @discord.ui.button(label="큐 보기", style=discord.ButtonStyle.secondary, custom_id="music:queue")
+    async def queue(self, interaction: discord.Interaction, button: Button) -> None:
+        await self.cog.show_queue(interaction, ephemeral=True)
+
+    @discord.ui.button(label="정지", style=discord.ButtonStyle.danger, custom_id="music:stop")
+    async def stop(self, interaction: discord.Interaction, button: Button) -> None:
+        await self.cog.stop_player(interaction)
+
+
+class SearchResults(View):
+    def __init__(self, cog: Music, guild_id: Optional[int], tracks: Sequence[Track]) -> None:
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.tracks = list(tracks)
+        self.add_item(SearchSelect(cog, self.tracks))
+
+
+class SearchSelect(Select):
+    def __init__(self, cog: Music, tracks: Sequence[Track]) -> None:
+        self.cog = cog
+        self.tracks = list(tracks)
+        options = [
+            discord.SelectOption(
+                label=clamp_title(track.title, 90),
+                description=fmt_duration(track.duration),
+                value=str(index),
+            )
+            for index, track in enumerate(self.tracks)
+        ]
+        super().__init__(placeholder="재생할 곡 선택", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        track = self.tracks[int(self.values[0])]
+        await interaction.response.defer(ephemeral=True)
+        await self.cog.enqueue_or_play(interaction, track, announce=False)
+        await interaction.followup.send(f"선택했어요: **{clamp_title(track.title)}**", ephemeral=True)
+
+
+class QueueControls(View):
+    def __init__(self, cog: Music, guild_id: int) -> None:
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.guild_id = guild_id
+
+    @discord.ui.button(label="첫 곡 제거", style=discord.ButtonStyle.secondary, custom_id="queue:remove_first")
+    async def remove_first(self, interaction: discord.Interaction, button: Button) -> None:
+        if not interaction.guild:
+            return
+        state = self.cog.state_for(interaction.guild.id)
+        if not state.queue:
+            await self.cog._reply(interaction, "큐가 비어 있어요.", ephemeral=True)
+            return
+        removed = state.queue.pop(0)
+        state.touch()
+        await self.cog._reply(interaction, f"제거했어요: **{clamp_title(removed.title)}**", ephemeral=True)
+        await self.cog._update_nowplaying(interaction.guild)
+
+    @discord.ui.button(label="섞기", style=discord.ButtonStyle.secondary, custom_id="queue:shuffle")
+    async def shuffle(self, interaction: discord.Interaction, button: Button) -> None:
+        if not interaction.guild:
+            return
+        state = self.cog.state_for(interaction.guild.id)
+        random.shuffle(state.queue)
+        state.touch()
+        await self.cog._reply(interaction, "큐를 섞었어요.", ephemeral=True)
+        await self.cog._update_nowplaying(interaction.guild)
+
+    @discord.ui.button(label="모두 비우기", style=discord.ButtonStyle.danger, custom_id="queue:clear")
+    async def clear(self, interaction: discord.Interaction, button: Button) -> None:
+        if not interaction.guild:
+            return
+        state = self.cog.state_for(interaction.guild.id)
+        state.queue.clear()
+        state.touch()
+        await self.cog._reply(interaction, "큐를 비웠어요.", ephemeral=True)
+        await self.cog._update_nowplaying(interaction.guild)
+
+
+async def setup(bot: commands.Bot) -> None:
+    await bot.add_cog(Music(bot))

@@ -1,43 +1,54 @@
-#bot.py
-
 import asyncio
+from pathlib import Path
+
 import discord
 from discord.ext import commands
-import os
 
 from config import DISCORD_TOKEN
+
+
+BASE_DIR = Path(__file__).resolve().parent
+COGS_DIR = BASE_DIR / "cogs"
 
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
 
-bot = commands.Bot(command_prefix='!', intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 디버깅을 위해 로깅 설정 (선택 사항)
-# import logging
-# discord.utils.setup_logging(level=logging.DEBUG)
 
-# @bot.event
-# async def on_ready():
-#     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
-#     print("------")
+@bot.event
+async def on_ready() -> None:
+    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    print("------")
+    try:
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} slash commands.")
+    except Exception as exc:
+        print(f"Failed to sync slash commands: {exc}")
 
-async def load_cogs():
-    # cogs 디렉터리에서 모든 .py 파일을 찾아 자동으로 로드합니다.
-    for filename in os.listdir('./cogs'):
-        if filename.endswith('.py') and filename != '__init__.py':
-            cog_name = filename[:-3]
-            try:
-                await bot.load_extension(f'cogs.{cog_name}')
-                print(f"Loaded cog: cogs.{cog_name}")
-            except Exception as e:
-                print(f"Failed to load cog {cog_name}: {e}")
 
-async def main():
+async def load_cogs() -> None:
+    for path in COGS_DIR.glob("*.py"):
+        if path.name == "__init__.py":
+            continue
+
+        cog_name = path.stem
+        try:
+            await bot.load_extension(f"cogs.{cog_name}")
+            print(f"Loaded cog: cogs.{cog_name}")
+        except Exception as exc:
+            print(f"Failed to load cog {cog_name}: {exc}")
+
+
+async def main() -> None:
+    if not DISCORD_TOKEN:
+        raise RuntimeError(".env 파일에 DISCORD_TOKEN을 설정해 주세요.")
+
     async with bot:
         await load_cogs()
         await bot.start(DISCORD_TOKEN)
 
-if __name__ == '__main__':
-    asyncio.run(main())
 
+if __name__ == "__main__":
+    asyncio.run(main())
